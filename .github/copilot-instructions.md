@@ -1,164 +1,113 @@
-# Copilot Instructions for replay_trajectory_classification
+# Copilot instructions for `replay_trajectory_classification`
 
-## Repository Summary
+## Build, test, and lint commands
 
-`replay_trajectory_classification` is a Python package for decoding spatial position from neural activity and categorizing trajectory types, specifically designed for analyzing hippocampal replay events in neuroscience research. The package provides state-space models that can decode position from both spike-sorted cells and clusterless spikes, with support for GPU acceleration and complex 1D/2D environments.
-
-## High-Level Repository Information
-
-- **Size**: ~63MB with 28 Python files
-- **Type**: Scientific Python package for computational neuroscience
-- **Primary Language**: Python 3.10+ (configured for Python 3.13 in current environment)
-- **Key Dependencies**: NumPy, SciPy, scikit-learn, numba, xarray, dask, matplotlib, pandas
-- **Documentation**: Sphinx-based documentation with ReadTheDocs hosting
-- **License**: MIT
-
-## Environment Setup and Build Instructions
-
-### Prerequisites
-Always use conda for environment management due to complex scientific dependencies:
+Use the conda environment from `environment.yml`; this repository depends on `conda-forge`, `franklab`, and `edeno` packages such as `track_linearization` and `regularized_glm`.
 
 ```bash
-# Update conda first (required)
-conda update -n base conda
-
-# Create environment from environment.yml (required)
 conda env create -f environment.yml
-
-# Activate environment
 conda activate replay_trajectory_classification
-```
-
-### Installation Commands
-**ALWAYS install in development mode for code changes:**
-
-```bash
-# Modern development installation (recommended)
 pip install -e .
-
-# With optional development tools
-pip install -e '.[dev]'      # Includes ruff, jupyter, testing tools
-pip install -e '.[test]'     # Testing dependencies only
-pip install -e '.[docs]'     # Documentation building tools
 ```
 
-**Note**: The repository has been fully modernized to use `pyproject.toml`. The old `setup.py develop` command is no longer available.
+Install optional toolsets as needed:
 
-### Validation Commands
-
-#### Package Import Test
 ```bash
-python -c "import replay_trajectory_classification; print('Package imported successfully')"
+pip install -e '.[dev]'
+pip install -e '.[test]'
+pip install -e '.[docs]'
 ```
-**Expected output**: "Cupy is not installed or GPU is not detected. Ignore this message if not using GPU" followed by "Package imported successfully"
 
-#### Linting
+Lint:
+
 ```bash
-# Modern linting (preferred)
 ruff check replay_trajectory_classification/
-
-# Legacy flake8 still works
 flake8 replay_trajectory_classification/ --max-line-length=88 --select=E9,F63,F7,F82 --show-source --statistics
 ```
-**Expected**: Minimal output (style issues are non-breaking)
 
-#### Notebook Testing (CI Validation)
-The main test suite runs Jupyter notebooks. Test individual notebooks:
+Unit tests:
+
+```bash
+pytest replay_trajectory_classification/tests -v
+pytest replay_trajectory_classification/tests/unit -v -m "not gpu"
+pytest replay_trajectory_classification/tests/unit/test_api_basic.py::test_main_api_imports -v
+```
+
+Pytest markers from `pytest.ini`:
+
+```bash
+pytest replay_trajectory_classification/tests -v -m "not slow"
+pytest replay_trajectory_classification/tests -v -m "not gpu"
+```
+
+Notebook integration tests (these are the CI-critical tests in `.github/workflows/PR-test.yml`):
+
 ```bash
 jupyter nbconvert --to notebook --ExecutePreprocessor.kernel_name=python3 --execute notebooks/tutorial/01-Introduction_and_Data_Format.ipynb --output-dir=/tmp
-```
-**Time required**: ~2-3 minutes per notebook
-**Expected**: Notebook executes without errors
 
-#### Documentation Build
+for nb in notebooks/tutorial/*.ipynb; do
+  jupyter nbconvert --to notebook --inplace --ExecutePreprocessor.kernel_name=python3 --ExecutePreprocessor.timeout=1800 --execute "$nb"
+done
+```
+
+Build distributions:
+
 ```bash
-# First install docs dependencies
-pip install -r docs/requirements-docs.txt
-
-# Note: Documentation build has dependency issues with jupytext in Makefile
-# The docs can be built but require manual intervention
+pip install build
+python -m build --wheel
+python -m build --sdist
 ```
 
-## Continuous Integration
+Documentation:
 
-The repository uses GitHub Actions (`.github/workflows/PR-test.yml`):
-- **Trigger**: All pushes
-- **OS**: Ubuntu latest only
-- **Python**: 3.11 (but environment.yml uses current conda defaults)
-- **Test Process**: Executes all 5 tutorial notebooks sequentially
-- **Environment**: Uses conda with channels: conda-forge, franklab, edeno
-- **Installation**: `pip install -e .` after conda environment setup
+```bash
+pip install -e '.[docs]'
+make -C docs html
+```
 
-## Project Architecture and Layout
+## High-level architecture
 
-### Core Package Structure (`replay_trajectory_classification/`)
-- **`__init__.py`**: Main API exports (ClassifierBase, Decoders, Environment, etc.)
-- **`classifier.py`**: Base classes for trajectory classification with both sorted/clusterless approaches
-- **`decoder.py`**: Core decoding functionality
-- **`environments.py`**: Spatial environment representation with discrete grids
-- **`core.py`**: Low-level computational functions
-- **`likelihoods/`**: Subpackage with various likelihood models (KDE, GLM, multiunit, GPU variants)
+`replay_trajectory_classification/__init__.py` is the public API surface. It re-exports the main decoder/classifier classes, transition models, `Environment`, `ObservationModel`, and several `track_linearization` helpers, so compatibility changes often need to be reflected there.
 
-### Key Configuration Files
-- **`environment.yml`**: Conda environment specification with scientific computing stack
-- **`setup.py`**: Package configuration and dependencies
-- **`.readthedocs.yaml`**: Documentation build configuration
-- **`docs/conf.py`**: Sphinx documentation configuration
-- **`docs/requirements-docs.txt`**: Documentation build dependencies
+The package is organized around state-space decoding:
 
-### Documentation (`docs/`)
-- **Sphinx-based** with ReadTheDocs hosting
-- **API docs**: Auto-generated from docstrings
-- **Installation guide**: `installation.md`
-- **Build system**: Makefile (but has jupytext dependency issues)
+- `decoder.py` implements single-dynamics spatial decoding through `_DecoderBase`, `SortedSpikesDecoder`, and `ClusterlessDecoder`.
+- `classifier.py` implements multi-state trajectory classification through `_ClassifierBase`, `SortedSpikesClassifier`, and `ClusterlessClassifier`.
+- `core.py` contains the low-level causal/acausal Bayesian routines used by both decoders and classifiers. These paths are performance-sensitive and include CPU and GPU variants.
 
-### Tutorials (`notebooks/tutorial/`)
-Five comprehensive Jupyter notebooks demonstrate package usage:
-1. **01-Introduction_and_Data_Format.ipynb**: Data format requirements
-2. **02-Decoding_with_Sorted_Spikes.ipynb**: Single movement model with sorted spikes
-3. **03-Decoding_with_Clusterless_Spikes.ipynb**: Single movement model with clusterless approach
-4. **04-Classifying_with_Sorted_Spikes.ipynb**: Multiple movement models with sorted spikes
-5. **05-Classifying_with_Clusterless_Spikes.ipynb**: Multiple movement models with clusterless spikes
+Spatial geometry is handled by `environments.py`. `Environment` is a dataclass that discretizes position into bins, either by inferring a grid from position samples or by constructing a 1D layout from a `track_graph`. Classifiers can hold multiple `Environment` instances at once.
 
-### Dependencies Not Obvious from Structure
-- **track_linearization**: External package for spatial track handling (imported in `__init__.py`)
-- **regularized_glm**: Custom GLM implementation
-- **GPU dependencies**: CuPy for GPU acceleration (optional)
-- **franklab & edeno conda channels**: Required for specialized neuroscience packages
+Observation/state wiring is split across:
 
-## Important Development Notes
+- `observation_model.py`, where `ObservationModel(environment_name, encoding_group)` links a classifier state to an environment and encoding group.
+- `continuous_state_transitions.py`, which defines movement models such as `RandomWalk`, `EmpiricalMovement`, `RandomWalkDirection1`, `RandomWalkDirection2`, `Identity`, and `Uniform`.
+- `discrete_state_transitions.py`, which defines switching among states with `DiagonalDiscrete`, `RandomDiscrete`, `UniformDiscrete`, and `UserDefinedDiscrete`.
 
-### Environment Requirements
-- **ALWAYS** use the conda environment - pip-only installations will fail due to complex scientific dependencies
-- **GPU support** requires CuPy installation (optional, warnings are normal without GPU)
-- **Documentation builds** may require manual intervention due to jupytext path issues
+Likelihood estimation is registry-driven. `likelihoods/__init__.py` maps algorithm strings to `(fit_fn, estimate_fn)` pairs for sorted spikes, clusterless multiunit data, and calcium data. Decoder/classifier classes choose implementations through parameters like `sorted_spikes_algorithm` and `clusterless_algorithm` instead of hard-coding one likelihood.
 
-### Testing Approach
-- **Integration testing**: All 5 tutorial notebooks must execute successfully
-- **CI dependency**: Notebooks test real scientific workflows, not isolated functions
+The typical flow is:
 
-### Common Issues and Workarounds
-- **Documentation build**: Makefile expects jupytext in PATH but may not find conda environment version
-- **Setup.py warnings**: Deprecation warnings are expected but installation succeeds
-- **GPU warnings**: "Cupy not installed" messages are normal for CPU-only environments
-- **Long notebook execution**: Tutorial notebooks can take 2-3 minutes each to execute
+1. Fit environment bins from position.
+2. Fit observation model parameters from spikes or multiunit marks.
+3. Fit continuous/discrete transition models and initial conditions.
+4. Run `predict(...)`, which calls the shared Bayesian core and returns labeled results.
 
-### File Exclusions (from .gitignore)
-Key files to exclude from commits:
-- Jupyter checkpoint files (`.ipynb_checkpoints`)
-- Build artifacts (`_build`, `_autosummary`, `dist/`)
-- Data files (`*.mat`, `*.csv`, `*.nc`)
-- Cache files (`__pycache__`, `*.prof`)
+`predict()` methods return `xarray.Dataset` objects, not plain NumPy arrays or pandas DataFrames. Downstream code expects named dimensions such as time, position bins, and states.
 
-## Validation Checklist for Changes
+## Key conventions
 
-1. **Environment setup**: Conda environment creates successfully
-2. **Installation**: `python setup.py develop` or `pip install -e .` succeeds
-3. **Import test**: Package imports without errors (GPU warnings OK)
-4. **Lint check**: flake8 passes with specified parameters
-5. **Notebook execution**: All tutorial notebooks run successfully
-6. **CI compatibility**: Changes don't break the GitHub Actions workflow
+There are parallel sorted-spike and clusterless pathways throughout the codebase. If you change shared behavior in `decoder.py`, `classifier.py`, or `likelihoods/`, check whether the corresponding sorted and clusterless classes or algorithms need matching updates.
 
-## Final Note
+Likelihood APIs follow a fit/estimate split. Registry entries pair a training-time function with an inference-time function; new likelihoods should fit that pattern so they can plug into the existing algorithm maps cleanly.
 
-This package serves active neuroscience research. Changes should maintain scientific accuracy and computational efficiency. The codebase prioritizes correctness over traditional software engineering practices (hence notebook-based testing). Trust these instructions and only search for additional information if specific technical details are missing or incorrect.
+Scikit-learn-style estimator conventions matter here. The main classes inherit from `sklearn.base.BaseEstimator`, expose `fit(...)`/`predict(...)`, and support persistence helpers like `save_model()` / `load_model()`.
+
+Environment names are the join key for multi-environment classification. `ObservationModel.environment_name` is how classifier states are associated with particular `Environment` instances, so keep those names aligned when adding or reworking multi-environment logic.
+
+GPU support is optional, not a separate product line. GPU implementations live in `*_gpu.py` modules and are selected by algorithm name or `use_gpu=True`; CPU behavior must remain correct when CuPy is unavailable.
+
+Notebook tutorials in `notebooks/tutorial/` are not just examples; CI executes them end-to-end. Keep them runnable when changing public APIs, defaults, result shapes, or import paths.
+
+Unit tests under `replay_trajectory_classification/tests/unit/` use small synthetic datasets and sometimes skip edge cases around inferred track boundaries. For low-level behavior changes, run targeted pytest cases plus the affected tutorial notebook.
+
+The repository uses modern packaging through `pyproject.toml`; prefer `pip install -e .` and `python -m build ...` workflows, not legacy `setup.py` commands.
