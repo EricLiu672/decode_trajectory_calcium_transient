@@ -2,6 +2,8 @@
 
 This module provides standard implementations of Bayesian decoding approaches
 including maximum a posteriori estimation and other common algorithms.
+Mark likelihoods: for clustering unsorted multiunit activity
+Poisson likelihood: for sorted neural activity (log-likelihood)
 """
 
 from __future__ import annotations
