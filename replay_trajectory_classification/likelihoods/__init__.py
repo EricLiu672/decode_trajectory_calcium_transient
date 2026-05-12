@@ -21,6 +21,10 @@ from replay_trajectory_classification.likelihoods.calcium_likelihood import (
     estimate_calcium_likelihood,
     estimate_calcium_place_fields,
 )
+from replay_trajectory_classification.likelihoods.deconv_calcium_likelihood import (
+    estimate_zig_likelihood,
+    estimate_zig_place_fields,
+)
 from replay_trajectory_classification.likelihoods.multiunit_likelihood import (
     estimate_multiunit_likelihood,
     fit_multiunit_likelihood,
@@ -88,5 +92,9 @@ _SORTED_SPIKES_ALGORITHMS: dict[str, tuple[Callable[..., Any], Callable[..., Any
 }
 
 _CALCIUM_ALGORITHMS: dict[str, tuple[Callable[..., Any], Callable[..., Any]]] = {
-    "calcium_likelihood": (estimate_calcium_place_fields, estimate_calcium_likelihood)
+    "calcium_likelihood": (estimate_calcium_place_fields, estimate_calcium_likelihood),
+    "deconv_calcium_likelihood": (
+        estimate_zig_place_fields,
+        estimate_zig_likelihood,
+    ),
 }

@@ -4,10 +4,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import replay_trajectory_classification.likelihoods.calcium_likelihood as calcium_likelihood
-import replay_trajectory_classification.likelihoods.multiunit_likelihood as multiunit_likelihood
-import replay_trajectory_classification.likelihoods.spiking_likelihood_glm as spiking_likelihood_glm
-import replay_trajectory_classification.likelihoods.spiking_likelihood_kde as spiking_likelihood_kde
+import importlib
+
+import xarray as xr
+from replay_trajectory_classification.likelihoods import calcium_likelihood
+from replay_trajectory_classification.likelihoods import multiunit_likelihood
+from replay_trajectory_classification.likelihoods import spiking_likelihood_glm
+from replay_trajectory_classification.likelihoods import spiking_likelihood_kde
 
 # Test imports for likelihood modules
 from replay_trajectory_classification.environments import Environment
@@ -265,6 +268,62 @@ def test_calcium_likelihood_estimate_exists():
     ), "No estimate functions found in calcium_likelihood module"
 
 
+def test_deconv_calcium_likelihood_exposes_fit_and_estimate_functions():
+    """Test that the deconvolved calcium ZIG likelihood exposes public APIs."""
+    module = importlib.import_module(
+        "replay_trajectory_classification.likelihoods.deconv_calcium_likelihood"
+    )
+
+    assert hasattr(module, "estimate_zig_place_fields")
+    assert callable(module.estimate_zig_place_fields)
+    assert hasattr(module, "estimate_zig_likelihood")
+    assert callable(module.estimate_zig_likelihood)
+
+
+def test_deconv_calcium_likelihood_fit_returns_parameterized_place_fields():
+    """Test that ZIG fitting returns position-by-neuron fields for p and theta."""
+    module = importlib.import_module(
+        "replay_trajectory_classification.likelihoods.deconv_calcium_likelihood"
+    )
+    environment = make_1d_env(n=5)
+    position = np.linspace(0.0, 4.0, 10).reshape(-1, 1)
+    calcium_activity = np.column_stack(
+        [
+            np.clip(np.sin(position[:, 0]) + 1.0, 0.0, None),
+            np.clip(np.cos(position[:, 0]) + 1.0, 0.0, None),
+        ]
+    )
+
+    place_fields, k_values = module.estimate_zig_place_fields(
+        position=position,
+        calcium_activity=calcium_activity,
+        place_bin_centers=environment.place_bin_centers_,
+        place_bin_edges=environment.place_bin_edges_,
+        gen_nodes=4,
+        learning_rate=1e-3,
+        n_epochs=1,
+        batch_size=4,
+    )
+
+    assert isinstance(place_fields, xr.DataArray)
+    assert place_fields.dims == ("position", "neuron", "parameter")
+    assert place_fields.shape == (environment.place_bin_centers_.shape[0], 2, 2)
+    assert list(place_fields.coords["parameter"].values) == ["p", "theta"]
+    assert k_values.shape == (2,)
+
+
+def test_deconv_calcium_likelihood_is_registered_as_calcium_algorithm():
+    """Test that the ZIG likelihood is discoverable through the calcium registry."""
+    from replay_trajectory_classification import likelihoods
+
+    fit_func, estimate_func = likelihoods._CALCIUM_ALGORITHMS[
+        "deconv_calcium_likelihood"
+    ]
+
+    assert fit_func.__name__ == "estimate_zig_place_fields"
+    assert estimate_func.__name__ == "estimate_zig_likelihood"
+
+
 # ---------------------- General Likelihood Interface Tests ----------------------
 
 
@@ -380,7 +439,10 @@ def test_fit_estimate_consistency():
                 # If one exists, both should exist for consistency
                 assert (
                     has_fit and has_estimate
-                ), f"Module {module.__name__} should have both fit and estimate functions"
+                ), (
+                    f"Module {module.__name__} should have both fit "
+                    "and estimate functions"
+                )
 
                 # Both should be callable
                 fit_func = getattr(module, fit_func_name)

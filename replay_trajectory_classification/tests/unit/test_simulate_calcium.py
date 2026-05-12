@@ -1,5 +1,10 @@
 import numpy as np
 
+from replay_trajectory_classification.calcium_sorted_spikes_decoding import (
+    deconvolve_and_binarize,
+    fit_sorted_spikes_decoder,
+    median_decoding_error,
+)
 from replay_trajectory_classification.simulate_calcium import (
     make_simulated_run_data,
     make_hover_replay,
@@ -183,3 +188,85 @@ def test_make_theta_sweep_handles_odd_internal_replay_lengths():
     assert replay_time.shape == (test_spikes.shape[0],)
     assert test_spikes.shape == calcium_traces.shape
     assert test_spikes.shape[1] == 20
+
+
+def test_deconvolve_and_binarize_returns_binary_spike_matrix():
+    """Deconvolution returns a binary spike matrix aligned with the calcium input."""
+    (
+        _time,
+        _position,
+        _sampling_frequency,
+        calcium_traces,
+        _true_spikes,
+        _place_fields,
+    ) = make_simulated_run_data(
+        sampling_frequency=30,
+        track_height=50.0,
+        running_speed=10.0,
+        n_runs=1,
+        place_field_means=np.array([10.0, 25.0, 40.0]),
+        sigma=0.1,
+        rng=np.random.default_rng(11),
+    )
+
+    inferred_spikes = deconvolve_and_binarize(calcium_traces)
+
+    assert inferred_spikes.shape == calcium_traces.shape
+    assert np.issubdtype(inferred_spikes.dtype, np.integer)
+    assert set(np.unique(inferred_spikes)).issubset({0, 1})
+    assert inferred_spikes.sum() > 0
+
+
+def test_fit_sorted_spikes_decoder_decodes_binarized_calcium_run_data():
+    """A decoder fit from calcium-derived spikes can recover position on a new run."""
+    run_a = make_simulated_run_data(
+        sampling_frequency=30,
+        track_height=120.0,
+        running_speed=10.0,
+        n_runs=2,
+        place_field_means=np.linspace(0.0, 120.0, 12),
+        sigma=1.0,
+        rng=np.random.default_rng(0),
+    )
+    run_b = make_simulated_run_data(
+        sampling_frequency=30,
+        track_height=120.0,
+        running_speed=10.0,
+        n_runs=2,
+        place_field_means=np.linspace(0.0, 120.0, 12),
+        sigma=1.0,
+        rng=np.random.default_rng(1),
+    )
+
+    (
+        time_a,
+        position_a,
+        sampling_frequency,
+        calcium_a,
+        _true_spikes_a,
+        _place_fields_a,
+    ) = run_a
+    (
+        time_b,
+        position_b,
+        _sampling_frequency_b,
+        calcium_b,
+        _true_spikes_b,
+        _place_fields_b,
+    ) = run_b
+
+    decoder, inferred_spikes_a = fit_sorted_spikes_decoder(
+        position=position_a,
+        calcium_traces=calcium_a,
+        sampling_frequency=sampling_frequency,
+        position_std=3.0,
+    )
+    inferred_spikes_b = deconvolve_and_binarize(calcium_b)
+    results = decoder.predict(inferred_spikes_b, time=time_b)
+
+    assert inferred_spikes_a.shape == calcium_a.shape
+    assert results.causal_posterior.shape[0] == time_b.shape[0]
+    assert results.acausal_posterior.shape[0] == time_b.shape[0]
+    np.testing.assert_allclose(results.causal_posterior.sum("position"), 1.0)
+    np.testing.assert_allclose(results.acausal_posterior.sum("position"), 1.0)
+    assert median_decoding_error(results.acausal_posterior, position_b) < 5.0
