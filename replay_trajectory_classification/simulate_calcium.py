@@ -31,6 +31,9 @@ PLACE_FIELD_VARIANCE = 6.0**2
 PLACE_FIELD_MEANS = np.arange(0, TRACK_HEIGHT + 10, 10, dtype=np.float64)
 N_RUNS = 15
 REPLAY_SPEEDUP = 120
+CALCIUM_HOVER_N_FRAMES = 90
+CALCIUM_CONTINUOUS_REPLAY_SPEEDUP = 10
+CALCIUM_FRAGMENTED_N_FRAMES = 45
 
 
 def compute_ar2_coefficients(
@@ -228,7 +231,7 @@ def make_continuous_replay(
     track_height: float = TRACK_HEIGHT,
     running_speed: float = RUNNING_SPEED,
     place_field_means: NDArray[np.float64] = PLACE_FIELD_MEANS,
-    replay_speedup: int = REPLAY_SPEEDUP,
+    replay_speedup: int = CALCIUM_CONTINUOUS_REPLAY_SPEEDUP,
     is_outbound: bool = True,
     sigma: float | NDArray[np.float64] = NOISE_SIGMA,
     tau_d: float = TAU_D,
@@ -267,11 +270,17 @@ def make_hover_replay(
     rng: Optional[np.random.Generator] = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Simulate a stationary replay event and its calcium traces."""
-    replay_time, replay_spikes = sorted_spikes_simulation.make_hover_replay(
-        hover_neuron_ind=hover_neuron_ind,
-        place_field_means=place_field_means,
-        sampling_frequency=internal_sampling_frequency,
-    )
+    n_neurons = place_field_means.shape[0]
+    if hover_neuron_ind is None:
+        hover_neuron_ind = n_neurons // 2
+
+    subsample_factor = internal_sampling_frequency // sampling_frequency
+    n_time_internal = CALCIUM_HOVER_N_FRAMES * subsample_factor
+    replay_time = np.arange(n_time_internal) / internal_sampling_frequency
+    replay_spikes = np.zeros((n_time_internal, n_neurons))
+    spike_time_ind = np.arange(0, n_time_internal, 2 * subsample_factor)
+    replay_spikes[spike_time_ind, hover_neuron_ind] = 1.0
+
     return _make_calcium_replay(
         replay_time,
         replay_spikes,
@@ -294,10 +303,16 @@ def make_fragmented_replay(
     rng: Optional[np.random.Generator] = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Simulate a fragmented replay event and its calcium traces."""
-    replay_time, replay_spikes = sorted_spikes_simulation.make_fragmented_replay(
-        place_field_means=place_field_means,
-        sampling_frequency=internal_sampling_frequency,
-    )
+    n_neurons = place_field_means.shape[0]
+    subsample_factor = internal_sampling_frequency // sampling_frequency
+    n_time_internal = CALCIUM_FRAGMENTED_N_FRAMES * subsample_factor
+    replay_time = np.arange(n_time_internal) / internal_sampling_frequency
+    replay_spikes = np.zeros((n_time_internal, n_neurons))
+    spike_time_ind = np.linspace(1, CALCIUM_FRAGMENTED_N_FRAMES - 1, num=5, dtype=int)
+    spike_time_ind *= subsample_factor
+    neuron_ind = np.asarray([1, -1, 10, -5, 8]) % n_neurons
+    replay_spikes[spike_time_ind, neuron_ind] = 1.0
+
     return _make_calcium_replay(
         replay_time,
         replay_spikes,

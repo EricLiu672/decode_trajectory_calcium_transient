@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 
 from replay_trajectory_classification.classifier import (
+    CalciumClassifier,
     ClusterlessClassifier,
     SortedSpikesClassifier,
 )
@@ -121,6 +122,85 @@ def test_clusterless_classifier_construction():
     assert classifier is not None
     assert hasattr(classifier, "environments")
     assert len(classifier.environments) == 2
+
+
+def test_calcium_classifier_construction():
+    """Test that CalciumClassifier can be constructed."""
+    environments = [make_1d_env("env1", n=9), make_1d_env("env2", n=7)]
+
+    classifier = CalciumClassifier(environments=environments)
+
+    assert classifier is not None
+    assert hasattr(classifier, "environments")
+    assert len(classifier.environments) == 2
+
+
+def test_calcium_classifier_predict_requires_fit():
+    """Test that predict requires the calcium classifier to be fit first."""
+    environments = [make_1d_env("env1", n=5)]
+    classifier = CalciumClassifier(environments=environments)
+
+    calcium_activity = np.ones((10, 3), dtype=float)
+
+    with pytest.raises((AttributeError, ValueError)):
+        classifier.predict(calcium_activity)
+
+
+def test_calcium_classifier_zig_fit_predict_smoke():
+    """CalciumClassifier can fit and predict through the ZIG likelihood path."""
+    environments = [make_1d_env("", n=5)]
+    classifier = CalciumClassifier(
+        environments=environments,
+        calcium_algorithm="deconv_calcium_likelihood",
+        calcium_algorithm_params={
+            "gen_nodes": 4,
+            "learning_rate": 1e-3,
+            "n_epochs": 1,
+            "batch_size": 4,
+        },
+    )
+
+    position = np.linspace(0.0, 4.0, 10).reshape(-1, 1)
+    calcium_activity = np.column_stack(
+        [
+            np.clip(np.sin(position[:, 0]) + 1.0, 0.0, None),
+            np.clip(np.cos(position[:, 0]) + 1.0, 0.0, None),
+        ]
+    )
+
+    classifier.fit(position, calcium_activity)
+    results = classifier.predict(calcium_activity)
+
+    assert results.sizes["time"] == calcium_activity.shape[0]
+    assert "likelihood" in results
+    assert "causal_posterior" in results
+    assert "acausal_posterior" in results
+
+
+def test_calcium_classifier_gamma_fit_predict_smoke():
+    """CalciumClassifier can fit and predict through the default gamma path."""
+    environments = [make_1d_env("", n=5)]
+    classifier = CalciumClassifier(
+        environments=environments,
+        calcium_algorithm="calcium_likelihood",
+        calcium_algorithm_params={"penalty": 1e-1, "knot_spacing": 1},
+    )
+
+    position = np.linspace(0.0, 4.0, 12).reshape(-1, 1)
+    calcium_activity = np.column_stack(
+        [
+            0.5 + 0.5 * np.sin(np.linspace(0.0, np.pi, 12)),
+            0.5 + 0.5 * np.cos(np.linspace(0.0, np.pi, 12)) ** 2,
+        ]
+    )
+
+    classifier.fit(position, calcium_activity)
+    results = classifier.predict(calcium_activity)
+
+    assert results.sizes["time"] == calcium_activity.shape[0]
+    assert "likelihood" in results
+    assert "causal_posterior" in results
+    assert "acausal_posterior" in results
 
 
 

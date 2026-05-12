@@ -26,6 +26,7 @@ from track_linearization import (
 )
 
 from replay_trajectory_classification.classifier import (
+    CalciumClassifier,
     ClusterlessClassifier,
     SortedSpikesClassifier,
 )

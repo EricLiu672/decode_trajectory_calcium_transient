@@ -6,6 +6,9 @@ from replay_trajectory_classification.calcium_sorted_spikes_decoding import (
     median_decoding_error,
 )
 from replay_trajectory_classification.simulate_calcium import (
+    CALCIUM_HOVER_N_FRAMES,
+    make_continuous_replay,
+    make_fragmented_replay,
     make_simulated_run_data,
     make_hover_replay,
     make_theta_sweep,
@@ -100,6 +103,35 @@ def test_make_hover_replay_returns_calcium_for_the_hovered_neuron():
     assert np.argmax(test_spikes.sum(axis=0)) == 1
     assert np.all(np.diff(replay_time) > 0.0)
     assert np.all(calcium_traces >= 0.0)
+
+
+def test_make_hover_replay_default_duration_matches_calcium_timescale():
+    """Default hover replay should span a meaningful number of calcium frames."""
+    replay_time, test_spikes, calcium_traces = make_hover_replay(sigma=0.0)
+
+    assert replay_time.shape == (CALCIUM_HOVER_N_FRAMES,)
+    assert test_spikes.shape == calcium_traces.shape == (CALCIUM_HOVER_N_FRAMES, 19)
+    assert np.all(np.diff(replay_time) > 0.0)
+
+
+def test_make_continuous_replay_default_duration_matches_calcium_timescale():
+    """Default continuous replay should span many calcium frames, not just a few."""
+    replay_time, test_spikes, calcium_traces = make_continuous_replay(sigma=0.0)
+
+    assert replay_time.shape[0] >= 30
+    assert replay_time.shape == (test_spikes.shape[0],)
+    assert test_spikes.shape == calcium_traces.shape
+    assert replay_time[-1] >= 1.0
+
+
+def test_make_fragmented_replay_default_duration_matches_calcium_timescale():
+    """Default fragmented replay should produce a non-empty calcium-timescale event."""
+    replay_time, test_spikes, calcium_traces = make_fragmented_replay(sigma=0.0)
+
+    assert replay_time.shape[0] >= 30
+    assert replay_time.shape == (test_spikes.shape[0],)
+    assert test_spikes.shape == calcium_traces.shape
+    assert np.count_nonzero(test_spikes.sum(axis=1)) >= 5
 
 
 def test_make_simulated_run_data_is_reproducible_with_seeded_rng():

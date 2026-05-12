@@ -5,6 +5,7 @@ import pytest
 
 # Test main API imports work
 from replay_trajectory_classification import (
+    CalciumClassifier,
     ClusterlessClassifier,
     SortedSpikesClassifier,
     ClusterlessDecoder,
@@ -15,6 +16,7 @@ from replay_trajectory_classification import (
 
 def test_main_api_imports():
     """Test that main API classes can be imported."""
+    assert CalciumClassifier is not None
     assert ClusterlessClassifier is not None
     assert SortedSpikesClassifier is not None
     assert ClusterlessDecoder is not None

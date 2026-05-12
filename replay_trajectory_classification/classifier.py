@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from copy import deepcopy
+import inspect
 from logging import getLogger
 from typing import Optional, Union
 from typing_extensions import Self
@@ -53,6 +54,7 @@ from replay_trajectory_classification.initial_conditions import (
     UniformOneEnvironmentInitialConditions,
 )
 from replay_trajectory_classification.likelihoods import (
+    _CALCIUM_ALGORITHMS,
     _SORTED_SPIKES_ALGORITHMS,
     _ClUSTERLESS_ALGORITHMS,
 )
@@ -1127,6 +1129,173 @@ class SortedSpikesClassifier(_ClassifierBase):
             likelihood[(env_name, enc_group)] = _SORTED_SPIKES_ALGORITHMS[
                 self.sorted_spikes_algorithm
             ][1](spikes, place_fields.values, is_track_interior)
+        if store_likelihood:
+            self.likelihood_ = likelihood
+
+        return self._get_results(
+            likelihood, n_time, time, is_compute_acausal, use_gpu, state_names
+        )
+
+
+class CalciumClassifier(_ClassifierBase):
+    """Classifies trajectories from calcium activity."""
+
+    def __init__(
+        self,
+        environments: list[Environment] = _DEFAULT_ENVIRONMENT,
+        observation_models: Optional[ObservationModel] = None,
+        continuous_transition_types: list[
+            list[
+                Union[
+                    EmpiricalMovement,
+                    RandomWalk,
+                    RandomWalkDirection1,
+                    RandomWalkDirection2,
+                    Uniform,
+                ]
+            ]
+        ] = _DEFAULT_CONTINUOUS_TRANSITIONS,
+        discrete_transition_type: Union[
+            DiagonalDiscrete,
+            RandomDiscrete,
+            UniformDiscrete,
+            UserDefinedDiscrete,
+        ] = DiagonalDiscrete(0.98),
+        initial_conditions_type: Union[
+            UniformInitialConditions, UniformOneEnvironmentInitialConditions
+        ] = UniformInitialConditions(),
+        infer_track_interior: bool = True,
+        calcium_algorithm: str = "calcium_likelihood",
+        calcium_algorithm_params: Optional[dict] = None,
+    ):
+        super().__init__(
+            environments,
+            observation_models,
+            continuous_transition_types,
+            discrete_transition_type,
+            initial_conditions_type,
+            infer_track_interior,
+        )
+        self.calcium_algorithm = calcium_algorithm
+        self.calcium_algorithm_params = calcium_algorithm_params
+
+    def fit_place_fields(
+        self,
+        position: NDArray[np.float64],
+        calcium_activity: NDArray[np.float64],
+        is_training: Optional[NDArray[np.bool_]] = None,
+        encoding_group_labels: Optional[NDArray[np.int64]] = None,
+        environment_labels: Optional[NDArray[np.int64]] = None,
+    ) -> None:
+        """Fits the calcium observation model for each encoding group and environment."""
+        logger.info("Fitting calcium place fields...")
+        n_time = position.shape[0]
+        if is_training is None:
+            is_training = np.ones((n_time,), dtype=bool)
+
+        if encoding_group_labels is None:
+            encoding_group_labels = np.zeros((n_time,), dtype=np.int32)
+
+        if environment_labels is None:
+            environment_labels = np.asarray(
+                [self.environments[0].environment_name] * n_time
+            )
+
+        is_training = np.asarray(is_training).squeeze()
+        kwargs = self.calcium_algorithm_params or {}
+        fit_fn, estimate_fn = _CALCIUM_ALGORITHMS[self.calcium_algorithm]
+        likelihood_param_names = [
+            name
+            for name in inspect.signature(estimate_fn).parameters
+            if name not in {"calcium_activity", "place_fields", "is_track_interior"}
+        ]
+        if len(likelihood_param_names) != 1:
+            raise ValueError(
+                f"Expected exactly one calcium likelihood parameter, got {likelihood_param_names}"
+            )
+        likelihood_param_name = likelihood_param_names[0]
+
+        self.encoding_model_ = {}
+        for obs in np.unique(self.observation_models):
+            environment = self.environments[
+                self.environments.index(obs.environment_name)
+            ]
+            is_encoding = np.isin(encoding_group_labels, obs.encoding_group)
+            is_environment = environment_labels == obs.environment_name
+            is_group = is_training & is_encoding & is_environment
+            likelihood_name = (obs.environment_name, obs.encoding_group)
+
+            place_fields, likelihood_param = fit_fn(
+                position=position[is_group],
+                calcium_activity=calcium_activity[is_group],
+                place_bin_centers=environment.place_bin_centers_,
+                place_bin_edges=environment.place_bin_edges_,
+                **kwargs,
+            )
+            self.encoding_model_[likelihood_name] = {
+                "place_fields": place_fields,
+                "likelihood_kwargs": {likelihood_param_name: likelihood_param},
+            }
+
+    def fit(
+        self,
+        position: NDArray[np.float64],
+        calcium_activity: NDArray[np.float64],
+        is_training: Optional[NDArray[np.bool_]] = None,
+        encoding_group_labels: Optional[NDArray[np.int64]] = None,
+        environment_labels: Optional[NDArray[np.int64]] = None,
+    ) -> Self:
+        position = atleast_2d(np.asarray(position))
+        calcium_activity = np.asarray(calcium_activity)
+
+        self.fit_environments(position, environment_labels)
+        self.fit_initial_conditions()
+        self.fit_continuous_state_transition(
+            self.continuous_transition_types,
+            position,
+            is_training,
+            encoding_group_labels,
+            environment_labels,
+        )
+        self.fit_discrete_state_transition()
+        self.fit_place_fields(
+            position,
+            calcium_activity,
+            is_training,
+            encoding_group_labels,
+            environment_labels,
+        )
+
+        return self
+
+    def predict(
+        self,
+        calcium_activity: NDArray[np.float64],
+        time: Optional[NDArray[np.float64]] = None,
+        is_compute_acausal: bool = True,
+        use_gpu: bool = False,
+        state_names: Optional[list[str]] = None,
+        store_likelihood: bool = False,
+    ) -> xr.Dataset:
+        if not hasattr(self, "encoding_model_"):
+            raise ValueError("CalciumClassifier must be fit before calling predict.")
+        calcium_activity = np.asarray(calcium_activity)
+        n_time = calcium_activity.shape[0]
+
+        logger.info("Estimating likelihood...")
+        likelihood = {}
+        estimate_fn = _CALCIUM_ALGORITHMS[self.calcium_algorithm][1]
+        for (env_name, enc_group), payload in self.encoding_model_.items():
+            env_ind = self.environments.index(env_name)
+            is_track_interior = self.environments[env_ind].is_track_interior_.ravel(
+                order="F"
+            )
+            likelihood[(env_name, enc_group)] = estimate_fn(
+                calcium_activity=calcium_activity,
+                place_fields=np.asarray(payload["place_fields"]),
+                is_track_interior=is_track_interior,
+                **payload["likelihood_kwargs"],
+            )
         if store_likelihood:
             self.likelihood_ = likelihood
 
