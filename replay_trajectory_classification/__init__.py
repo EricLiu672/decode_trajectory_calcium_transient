@@ -51,12 +51,12 @@ from replay_trajectory_classification.environments import Environment
 from replay_trajectory_classification.initial_conditions import UniformInitialConditions
 from replay_trajectory_classification.observation_model import ObservationModel
 from replay_trajectory_classification.simulate_calcium import (
-    make_calcium_continuous_replay,
-    make_calcium_fragmented_replay,
-    make_calcium_hover_replay,
-    make_calcium_run_data,
-    simulate_ar2_calcium,
-    simulate_calcium_neuron,
+    make_continuous_replay,
+    make_fragmented_replay,
+    make_hover_replay,
+    make_simulated_run_data,
+    simulate_calcium_from_spikes,
+    compute_ar2_coefficients,
 )
 
 __version__ = "1.4.1"
