@@ -176,11 +176,12 @@ def make_continuous_replay(
     true_replay_position = simulate_position(replay_time, track_height, replay_speed)
 
     # Make inbound or outbound
-    replay_time = replay_time[: n_samples // 2]
+    half_n_samples = n_samples // 2
+    replay_time = replay_time[:half_n_samples]
     if is_outbound:
-        true_replay_position = true_replay_position[: n_samples // 2]
+        true_replay_position = true_replay_position[:half_n_samples]
     else:
-        true_replay_position = true_replay_position[n_samples // 2 :]
+        true_replay_position = true_replay_position[-half_n_samples:]
 
     min_times_ind = np.argmin(
         np.abs(true_replay_position[:, np.newaxis] - place_field_means), axis=0
