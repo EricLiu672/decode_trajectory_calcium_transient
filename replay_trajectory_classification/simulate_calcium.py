@@ -24,7 +24,7 @@ CALCIUM_SAMPLING_FREQUENCY = 30
 INTERNAL_SAMPLING_FREQUENCY = 1000
 TAU_D = 400.0
 TAU_R = 1.0
-NOISE_SIGMA = 0.3
+NOISE_SIGMA = 1.0
 TRACK_HEIGHT = 180
 RUNNING_SPEED = 15
 PLACE_FIELD_VARIANCE = 6.0**2
@@ -267,6 +267,7 @@ def make_hover_replay(
     sigma: float | NDArray[np.float64] = NOISE_SIGMA,
     tau_d: float = TAU_D,
     tau_r: float = TAU_R,
+    n_frames: int = CALCIUM_HOVER_N_FRAMES,
     rng: Optional[np.random.Generator] = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Simulate a stationary replay event and its calcium traces."""
@@ -275,7 +276,7 @@ def make_hover_replay(
         hover_neuron_ind = n_neurons // 2
 
     subsample_factor = internal_sampling_frequency // sampling_frequency
-    n_time_internal = CALCIUM_HOVER_N_FRAMES * subsample_factor
+    n_time_internal = n_frames * subsample_factor
     replay_time = np.arange(n_time_internal) / internal_sampling_frequency
     replay_spikes = np.zeros((n_time_internal, n_neurons))
     spike_time_ind = np.arange(0, n_time_internal, 2 * subsample_factor)
@@ -300,15 +301,16 @@ def make_fragmented_replay(
     sigma: float | NDArray[np.float64] = NOISE_SIGMA,
     tau_d: float = TAU_D,
     tau_r: float = TAU_R,
+    n_frames: int = CALCIUM_FRAGMENTED_N_FRAMES,
     rng: Optional[np.random.Generator] = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Simulate a fragmented replay event and its calcium traces."""
     n_neurons = place_field_means.shape[0]
     subsample_factor = internal_sampling_frequency // sampling_frequency
-    n_time_internal = CALCIUM_FRAGMENTED_N_FRAMES * subsample_factor
+    n_time_internal = n_frames * subsample_factor
     replay_time = np.arange(n_time_internal) / internal_sampling_frequency
     replay_spikes = np.zeros((n_time_internal, n_neurons))
-    spike_time_ind = np.linspace(1, CALCIUM_FRAGMENTED_N_FRAMES - 1, num=5, dtype=int)
+    spike_time_ind = np.linspace(1, n_frames - 1, num=5, dtype=int)
     spike_time_ind *= subsample_factor
     neuron_ind = np.asarray([1, -1, 10, -5, 8]) % n_neurons
     replay_spikes[spike_time_ind, neuron_ind] = 1.0
