@@ -15,6 +15,42 @@ from replay_trajectory_classification import (
 )
 
 
+def deconvolve_continuous(
+    calcium_traces: NDArray[np.float64],
+) -> NDArray[np.float32]:
+    """Infer continuous non-negative OASIS activity from calcium traces.
+
+    Parameters
+    ----------
+    calcium_traces : np.ndarray, shape (n_time, n_neurons) or (n_time,)
+        Simulated or observed calcium traces.
+
+    Returns
+    -------
+    continuous_activity : np.ndarray, shape (n_time, n_neurons)
+        Continuous OASIS output prior to any spike thresholding.
+    """
+
+    calcium_traces = np.asarray(calcium_traces, dtype=float)
+    if calcium_traces.ndim == 1:
+        calcium_traces = calcium_traces[:, np.newaxis]
+
+    n_time, n_neurons = calcium_traces.shape
+    shift = max(1, min(100, n_time // 2))
+    continuous_activity = np.zeros((n_time, n_neurons), dtype=np.float32)
+
+    for neuron_ind in range(n_neurons):
+        _, spikes, _, _, _ = deconvolve(
+            calcium_traces[:, neuron_ind],
+            g=(None, None),
+            penalty=1,
+            shift=shift,
+        )
+        continuous_activity[:, neuron_ind] = np.asarray(spikes, dtype=np.float32)
+
+    return continuous_activity
+
+
 def deconvolve_and_binarize(
     calcium_traces: NDArray[np.float64],
 ) -> NDArray[np.int8]:
@@ -31,24 +67,8 @@ def deconvolve_and_binarize(
         Binary spike indicators derived from the deconvolved OASIS output.
     """
 
-    calcium_traces = np.asarray(calcium_traces, dtype=float)
-    if calcium_traces.ndim == 1:
-        calcium_traces = calcium_traces[:, np.newaxis]
-
-    n_time, n_neurons = calcium_traces.shape
-    shift = max(1, min(100, n_time // 2))
-    inferred_spikes = np.zeros((n_time, n_neurons), dtype=np.int8)
-
-    for neuron_ind in range(n_neurons):
-        _, spikes, _, _, _ = deconvolve(
-            calcium_traces[:, neuron_ind],
-            g=(None, None),
-            penalty=1,
-            shift=shift,
-        )
-        inferred_spikes[:, neuron_ind] = np.asarray(spikes) > 0
-
-    return inferred_spikes
+    continuous_activity = deconvolve_continuous(calcium_traces)
+    return (continuous_activity > 0.0).astype(np.int8)
 
 
 def fit_sorted_spikes_decoder(

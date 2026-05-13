@@ -102,6 +102,40 @@ def _simulate_poisson_spikes_with_rng(
     return 1.0 * (rng.poisson(rate / sampling_frequency) > 0)
 
 
+def _replay_position_to_spikes(
+    replay_position: NDArray[np.float64],
+    place_field_means: NDArray[np.float64],
+    max_rate: float,
+    place_field_variance: float,
+    internal_sampling_frequency: int,
+    rng: np.random.Generator,
+) -> NDArray[np.float64]:
+    replay_position = np.asarray(replay_position, dtype=np.float64)
+    place_field_means = np.asarray(place_field_means, dtype=np.float64)
+    replay_position_2d = replay_position[:, np.newaxis]
+    replay_rates = np.stack(
+        [
+            simulate_place_field_firing_rate(
+                np.array([place_field_mean]),
+                replay_position_2d,
+                max_rate=max_rate,
+                variance=place_field_variance,
+            )
+            for place_field_mean in place_field_means
+        ],
+        axis=1,
+    )
+    return np.stack(
+        [
+            _simulate_poisson_spikes_with_rng(
+                replay_rate, internal_sampling_frequency, rng
+            )
+            for replay_rate in replay_rates.T
+        ],
+        axis=1,
+    )
+
+
 def make_simulated_run_data(
     sampling_frequency: int = CALCIUM_SAMPLING_FREQUENCY,
     internal_sampling_frequency: int = INTERNAL_SAMPLING_FREQUENCY,
@@ -233,6 +267,8 @@ def make_continuous_replay(
     track_height: float = TRACK_HEIGHT,
     running_speed: float = RUNNING_SPEED,
     place_field_means: NDArray[np.float64] = PLACE_FIELD_MEANS,
+    place_field_variance: float = PLACE_FIELD_VARIANCE,
+    max_rate: float = 15.0,
     n_frames: int = CALCIUM_CONTINUOUS_N_FRAMES,
     replay_speedup: float = 1.0,
     is_outbound: bool = True,
@@ -242,6 +278,9 @@ def make_continuous_replay(
     rng: Optional[np.random.Generator] = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Simulate a continuous replay event and its calcium traces."""
+    if rng is None:
+        rng = np.random.default_rng()
+
     subsample_factor = internal_sampling_frequency // sampling_frequency
     n_time_internal = n_frames * subsample_factor
     replay_time = np.arange(n_time_internal) / internal_sampling_frequency
@@ -252,21 +291,14 @@ def make_continuous_replay(
     else:
         replay_position = np.maximum(track_height - replay_speed * replay_time, 0.0)
 
-    place_field_means = np.asarray(place_field_means, dtype=np.float64)
-    covered_position = (place_field_means >= replay_position.min()) & (
-        place_field_means <= replay_position.max()
+    replay_spikes = _replay_position_to_spikes(
+        replay_position=replay_position,
+        place_field_means=place_field_means,
+        max_rate=max_rate,
+        place_field_variance=place_field_variance,
+        internal_sampling_frequency=internal_sampling_frequency,
+        rng=rng,
     )
-    replay_spikes = np.zeros((n_time_internal, place_field_means.shape[0]))
-
-    if np.any(covered_position):
-        covered_place_fields = place_field_means[covered_position]
-        min_times_ind = np.argmin(
-            np.abs(replay_position[:, np.newaxis] - covered_place_fields), axis=0
-        )
-        replay_spikes[
-            min_times_ind,
-            np.flatnonzero(covered_position),
-        ] = 1.0
 
     return _make_calcium_replay(
         replay_time,
@@ -285,14 +317,19 @@ def make_hover_replay(
     place_field_means: NDArray[np.float64] = PLACE_FIELD_MEANS,
     sampling_frequency: int = CALCIUM_SAMPLING_FREQUENCY,
     internal_sampling_frequency: int = INTERNAL_SAMPLING_FREQUENCY,
+    place_field_variance: float = PLACE_FIELD_VARIANCE,
+    max_rate: float = 15.0,
     sigma: float | NDArray[np.float64] = NOISE_SIGMA,
     tau_d: float = TAU_D,
     tau_r: float = TAU_R,
     n_frames: int = CALCIUM_HOVER_N_FRAMES,
-    spike_interval: int = 2,
     rng: Optional[np.random.Generator] = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Simulate a stationary replay event and its calcium traces."""
+    if rng is None:
+        rng = np.random.default_rng()
+
+    place_field_means = np.asarray(place_field_means, dtype=np.float64)
     n_neurons = place_field_means.shape[0]
     if hover_neuron_ind is None:
         hover_neuron_ind = n_neurons // 2
@@ -300,11 +337,15 @@ def make_hover_replay(
     subsample_factor = internal_sampling_frequency // sampling_frequency
     n_time_internal = n_frames * subsample_factor
     replay_time = np.arange(n_time_internal) / internal_sampling_frequency
-    replay_spikes = np.zeros((n_time_internal, n_neurons))
-    spike_time_ind = np.arange(
-        0, n_time_internal, spike_interval * subsample_factor
+    replay_position = np.full(n_time_internal, place_field_means[hover_neuron_ind])
+    replay_spikes = _replay_position_to_spikes(
+        replay_position=replay_position,
+        place_field_means=place_field_means,
+        max_rate=max_rate,
+        place_field_variance=place_field_variance,
+        internal_sampling_frequency=internal_sampling_frequency,
+        rng=rng,
     )
-    replay_spikes[spike_time_ind, hover_neuron_ind] = 1.0
 
     return _make_calcium_replay(
         replay_time,
@@ -322,25 +363,39 @@ def make_fragmented_replay(
     place_field_means: NDArray[np.float64] = PLACE_FIELD_MEANS,
     sampling_frequency: int = CALCIUM_SAMPLING_FREQUENCY,
     internal_sampling_frequency: int = INTERNAL_SAMPLING_FREQUENCY,
+    place_field_variance: float = PLACE_FIELD_VARIANCE,
+    max_rate: float = 15.0,
     sigma: float | NDArray[np.float64] = NOISE_SIGMA,
     tau_d: float = TAU_D,
     tau_r: float = TAU_R,
     n_frames: int = CALCIUM_FRAGMENTED_N_FRAMES,
-    spike_interval: int = 5,
+    n_positions: int = 5,
     rng: Optional[np.random.Generator] = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Simulate a fragmented replay event and its calcium traces."""
     if rng is None:
         rng = np.random.default_rng()
 
+    place_field_means = np.asarray(place_field_means, dtype=np.float64)
     n_neurons = place_field_means.shape[0]
+    if n_positions > n_neurons:
+        raise ValueError("n_positions cannot exceed the number of place fields.")
+
     subsample_factor = internal_sampling_frequency // sampling_frequency
     n_time_internal = n_frames * subsample_factor
     replay_time = np.arange(n_time_internal) / internal_sampling_frequency
-    replay_spikes = np.zeros((n_time_internal, n_neurons))
-    spike_time_ind = np.arange(0, n_frames, spike_interval) * subsample_factor
-    neuron_ind = rng.integers(0, n_neurons, size=spike_time_ind.size)
-    replay_spikes[spike_time_ind, neuron_ind] = 1.0
+    dwell_position_ind = rng.choice(n_neurons, size=n_positions, replace=False)
+    dwell_lengths = np.full(n_positions, n_time_internal // n_positions, dtype=int)
+    dwell_lengths[: n_time_internal % n_positions] += 1
+    replay_position = np.repeat(place_field_means[dwell_position_ind], dwell_lengths)
+    replay_spikes = _replay_position_to_spikes(
+        replay_position=replay_position,
+        place_field_means=place_field_means,
+        max_rate=max_rate,
+        place_field_variance=place_field_variance,
+        internal_sampling_frequency=internal_sampling_frequency,
+        rng=rng,
+    )
 
     return _make_calcium_replay(
         replay_time,
