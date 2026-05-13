@@ -6,6 +6,8 @@ from replay_trajectory_classification.calcium_sorted_spikes_decoding import (
     median_decoding_error,
 )
 from replay_trajectory_classification.simulate_calcium import (
+    CALCIUM_CONTINUOUS_N_FRAMES,
+    CALCIUM_FRAGMENTED_N_FRAMES,
     CALCIUM_HOVER_N_FRAMES,
     make_continuous_replay,
     make_fragmented_replay,
@@ -114,14 +116,50 @@ def test_make_hover_replay_default_duration_matches_calcium_timescale():
     assert np.all(np.diff(replay_time) > 0.0)
 
 
+def test_make_hover_replay_respects_spike_interval():
+    """Hover replay exposes the calcium-frame spike interval as part of its API."""
+    replay_time, test_spikes, calcium_traces = make_hover_replay(
+        hover_neuron_ind=1,
+        place_field_means=np.array([0.0, 50.0, 100.0]),
+        sampling_frequency=20,
+        sigma=0.0,
+        n_frames=12,
+        spike_interval=4,
+    )
+
+    assert replay_time.shape == (12,)
+    assert test_spikes.shape == calcium_traces.shape == (12, 3)
+    np.testing.assert_array_equal(np.flatnonzero(test_spikes[:, 1]), np.array([0, 4, 8]))
+    assert np.count_nonzero(test_spikes[:, [0, 2]]) == 0
+
+
 def test_make_continuous_replay_default_duration_matches_calcium_timescale():
     """Default continuous replay should span many calcium frames, not just a few."""
     replay_time, test_spikes, calcium_traces = make_continuous_replay(sigma=0.0)
 
-    assert replay_time.shape[0] >= 30
+    assert replay_time.shape == (CALCIUM_CONTINUOUS_N_FRAMES,)
     assert replay_time.shape == (test_spikes.shape[0],)
-    assert test_spikes.shape == calcium_traces.shape
-    assert replay_time[-1] >= 1.0
+    assert test_spikes.shape == calcium_traces.shape == (CALCIUM_CONTINUOUS_N_FRAMES, 19)
+    assert np.all(np.diff(replay_time) > 0.0)
+
+
+def test_make_continuous_replay_respects_frame_limited_realworld_speed():
+    """Continuous calcium replay only activates neurons within the traversed range."""
+    replay_time, test_spikes, calcium_traces = make_continuous_replay(
+        sampling_frequency=20,
+        internal_sampling_frequency=1000,
+        track_height=100.0,
+        running_speed=50.0,
+        place_field_means=np.array([0.0, 10.0, 20.0, 25.0, 40.0]),
+        n_frames=12,
+        replay_speedup=1.0,
+        sigma=0.0,
+    )
+
+    assert replay_time.shape == (12,)
+    assert test_spikes.shape == calcium_traces.shape == (12, 5)
+    np.testing.assert_array_equal(test_spikes.sum(axis=0), np.array([1.0, 1.0, 1.0, 1.0, 0.0]))
+    assert np.all(np.diff(np.flatnonzero(test_spikes.sum(axis=1))) >= 0)
 
 
 def test_make_fragmented_replay_default_duration_matches_calcium_timescale():
@@ -132,6 +170,24 @@ def test_make_fragmented_replay_default_duration_matches_calcium_timescale():
     assert replay_time.shape == (test_spikes.shape[0],)
     assert test_spikes.shape == calcium_traces.shape
     assert np.count_nonzero(test_spikes.sum(axis=1)) >= 5
+
+
+def test_make_fragmented_replay_respects_spike_interval():
+    """Fragmented replay exposes sparse jump timing at the calcium frame scale."""
+    replay_time, test_spikes, calcium_traces = make_fragmented_replay(
+        place_field_means=np.array([0.0, 50.0, 100.0, 150.0]),
+        sampling_frequency=20,
+        sigma=0.0,
+        n_frames=12,
+        spike_interval=4,
+        rng=np.random.default_rng(0),
+    )
+
+    assert replay_time.shape == (12,)
+    assert test_spikes.shape == calcium_traces.shape == (12, 4)
+    np.testing.assert_array_equal(np.flatnonzero(test_spikes.sum(axis=1)), np.array([0, 4, 8]))
+    np.testing.assert_array_equal(np.argmax(test_spikes[[0, 4, 8]], axis=1), np.array([3, 2, 2]))
+    np.testing.assert_array_equal(test_spikes.sum(axis=1)[[0, 4, 8]], np.ones(3))
 
 
 def test_make_simulated_run_data_is_reproducible_with_seeded_rng():
@@ -302,3 +358,102 @@ def test_fit_sorted_spikes_decoder_decodes_binarized_calcium_run_data():
     np.testing.assert_allclose(results.causal_posterior.sum("position"), 1.0)
     np.testing.assert_allclose(results.acausal_posterior.sum("position"), 1.0)
     assert median_decoding_error(results.acausal_posterior, position_b) < 5.0
+
+
+def test_state_space_classifier_separates_realworld_calcium_events_with_true_event_spikes():
+    """State-space event labels stay distinct when replay timing matches calcium timescales."""
+    from replay_trajectory_classification import (
+        DiagonalDiscrete,
+        Environment,
+        Identity,
+        RandomWalk,
+        SortedSpikesClassifier,
+        Uniform,
+    )
+    from replay_trajectory_classification.continuous_state_transitions import (
+        estimate_movement_var,
+    )
+
+    track_height = 200.0
+    place_field_means = np.linspace(0.0, track_height, 20)
+    sampling_frequency = 30
+    internal_sampling_frequency = 1000
+    running_speed = 15.0
+    sigma = 1.0
+    state_names = ["Local", "Stationary", "Jump"]
+
+    (
+        _time,
+        position,
+        _sampling_frequency,
+        calcium_traces,
+        _true_spikes,
+        _place_fields,
+    ) = make_simulated_run_data(
+        sampling_frequency=sampling_frequency,
+        internal_sampling_frequency=internal_sampling_frequency,
+        track_height=track_height,
+        running_speed=running_speed,
+        n_runs=2,
+        place_field_means=place_field_means,
+        sigma=sigma,
+        rng=np.random.default_rng(0),
+    )
+    inferred_spikes = deconvolve_and_binarize(calcium_traces)
+    movement_var = float(
+        estimate_movement_var(position.reshape(-1, 1), sampling_frequency)
+    )
+
+    classifier = SortedSpikesClassifier(
+        environments=[Environment(environment_name="", place_bin_size=1.0)],
+        continuous_transition_types=[
+            [RandomWalk(movement_var=movement_var), Identity(), Uniform()],
+            [RandomWalk(movement_var=movement_var), Identity(), Uniform()],
+            [Uniform(), Uniform(), Uniform()],
+        ],
+        discrete_transition_type=DiagonalDiscrete(),
+        sorted_spikes_algorithm="spiking_likelihood_kde",
+        sorted_spikes_algorithm_params={
+            "position_std": 3.0,
+            "use_diffusion": False,
+            "block_size": None,
+        },
+    )
+    classifier.fit(position, inferred_spikes)
+
+    def mean_state_probability(event_fn, seed, **kwargs):
+        time, true_spikes, _calcium_traces = event_fn(
+            sampling_frequency=sampling_frequency,
+            internal_sampling_frequency=internal_sampling_frequency,
+            place_field_means=place_field_means,
+            sigma=sigma,
+            rng=np.random.default_rng(seed),
+            **kwargs,
+        )
+        results = classifier.predict(true_spikes, time=time, state_names=state_names)
+        return results.acausal_posterior.sum("position").mean("time").values
+
+    continuous_probability = mean_state_probability(
+        make_continuous_replay,
+        2,
+        track_height=track_height,
+        running_speed=running_speed,
+        n_frames=CALCIUM_CONTINUOUS_N_FRAMES,
+        replay_speedup=1.0,
+    )
+    stationary_probability = mean_state_probability(
+        make_hover_replay,
+        3,
+        n_frames=CALCIUM_HOVER_N_FRAMES,
+    )
+    fragmented_probability = mean_state_probability(
+        make_fragmented_replay,
+        4,
+        n_frames=CALCIUM_FRAGMENTED_N_FRAMES,
+    )
+
+    assert continuous_probability[0] > continuous_probability[2]
+    assert stationary_probability[1] > stationary_probability[0]
+    assert stationary_probability[1] > stationary_probability[2]
+    assert fragmented_probability[2] > fragmented_probability[0]
+    assert fragmented_probability[2] > fragmented_probability[1]

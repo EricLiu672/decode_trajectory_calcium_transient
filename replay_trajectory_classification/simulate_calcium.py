@@ -30,9 +30,11 @@ RUNNING_SPEED = 15
 PLACE_FIELD_VARIANCE = 6.0**2
 PLACE_FIELD_MEANS = np.arange(0, TRACK_HEIGHT + 10, 10, dtype=np.float64)
 N_RUNS = 15
-REPLAY_SPEEDUP = 120
+
+# Calcium imaging at ~30 Hz can resolve real-world movement (`replay_speedup=1.0`)
+# but not canonical replay trajectories (~20x-120x real-world speed).
+CALCIUM_CONTINUOUS_N_FRAMES = 200
 CALCIUM_HOVER_N_FRAMES = 90
-CALCIUM_CONTINUOUS_REPLAY_SPEEDUP = 10
 CALCIUM_FRAGMENTED_N_FRAMES = 45
 
 
@@ -231,7 +233,8 @@ def make_continuous_replay(
     track_height: float = TRACK_HEIGHT,
     running_speed: float = RUNNING_SPEED,
     place_field_means: NDArray[np.float64] = PLACE_FIELD_MEANS,
-    replay_speedup: int = CALCIUM_CONTINUOUS_REPLAY_SPEEDUP,
+    n_frames: int = CALCIUM_CONTINUOUS_N_FRAMES,
+    replay_speedup: float = 1.0,
     is_outbound: bool = True,
     sigma: float | NDArray[np.float64] = NOISE_SIGMA,
     tau_d: float = TAU_D,
@@ -239,14 +242,32 @@ def make_continuous_replay(
     rng: Optional[np.random.Generator] = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Simulate a continuous replay event and its calcium traces."""
-    replay_time, replay_spikes = sorted_spikes_simulation.make_continuous_replay(
-        sampling_frequency=internal_sampling_frequency,
-        track_height=track_height,
-        running_speed=running_speed,
-        place_field_means=place_field_means,
-        replay_speedup=replay_speedup,
-        is_outbound=is_outbound,
+    subsample_factor = internal_sampling_frequency // sampling_frequency
+    n_time_internal = n_frames * subsample_factor
+    replay_time = np.arange(n_time_internal) / internal_sampling_frequency
+    replay_speed = running_speed * replay_speedup
+
+    if is_outbound:
+        replay_position = np.minimum(replay_speed * replay_time, track_height)
+    else:
+        replay_position = np.maximum(track_height - replay_speed * replay_time, 0.0)
+
+    place_field_means = np.asarray(place_field_means, dtype=np.float64)
+    covered_position = (place_field_means >= replay_position.min()) & (
+        place_field_means <= replay_position.max()
     )
+    replay_spikes = np.zeros((n_time_internal, place_field_means.shape[0]))
+
+    if np.any(covered_position):
+        covered_place_fields = place_field_means[covered_position]
+        min_times_ind = np.argmin(
+            np.abs(replay_position[:, np.newaxis] - covered_place_fields), axis=0
+        )
+        replay_spikes[
+            min_times_ind,
+            np.flatnonzero(covered_position),
+        ] = 1.0
+
     return _make_calcium_replay(
         replay_time,
         replay_spikes,
@@ -268,6 +289,7 @@ def make_hover_replay(
     tau_d: float = TAU_D,
     tau_r: float = TAU_R,
     n_frames: int = CALCIUM_HOVER_N_FRAMES,
+    spike_interval: int = 2,
     rng: Optional[np.random.Generator] = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Simulate a stationary replay event and its calcium traces."""
@@ -279,7 +301,9 @@ def make_hover_replay(
     n_time_internal = n_frames * subsample_factor
     replay_time = np.arange(n_time_internal) / internal_sampling_frequency
     replay_spikes = np.zeros((n_time_internal, n_neurons))
-    spike_time_ind = np.arange(0, n_time_internal, 2 * subsample_factor)
+    spike_time_ind = np.arange(
+        0, n_time_internal, spike_interval * subsample_factor
+    )
     replay_spikes[spike_time_ind, hover_neuron_ind] = 1.0
 
     return _make_calcium_replay(
@@ -302,17 +326,20 @@ def make_fragmented_replay(
     tau_d: float = TAU_D,
     tau_r: float = TAU_R,
     n_frames: int = CALCIUM_FRAGMENTED_N_FRAMES,
+    spike_interval: int = 5,
     rng: Optional[np.random.Generator] = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Simulate a fragmented replay event and its calcium traces."""
+    if rng is None:
+        rng = np.random.default_rng()
+
     n_neurons = place_field_means.shape[0]
     subsample_factor = internal_sampling_frequency // sampling_frequency
     n_time_internal = n_frames * subsample_factor
     replay_time = np.arange(n_time_internal) / internal_sampling_frequency
     replay_spikes = np.zeros((n_time_internal, n_neurons))
-    spike_time_ind = np.linspace(1, n_frames - 1, num=5, dtype=int)
-    spike_time_ind *= subsample_factor
-    neuron_ind = np.asarray([1, -1, 10, -5, 8]) % n_neurons
+    spike_time_ind = np.arange(0, n_frames, spike_interval) * subsample_factor
+    neuron_ind = rng.integers(0, n_neurons, size=spike_time_ind.size)
     replay_spikes[spike_time_ind, neuron_ind] = 1.0
 
     return _make_calcium_replay(
