@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
-from oasis.functions import deconvolve
+from oasis.functions import GetSn, deconvolve
+import scipy.linalg
 import xarray as xr
 
 from replay_trajectory_classification import (
@@ -13,6 +14,46 @@ from replay_trajectory_classification import (
     SortedSpikesDecoder,
     estimate_movement_var,
 )
+
+
+def _estimate_oasis_ar2_parameters(
+    calcium_trace: NDArray[np.float64],
+    *,
+    lags: int = 10,
+    fudge_factor: float = 0.98,
+) -> tuple[tuple[float, float], float]:
+    """Estimate AR(2) parameters without triggering SciPy toeplitz batching."""
+
+    calcium_trace = np.asarray(calcium_trace, dtype=np.float64)
+    noise_std = float(GetSn(calcium_trace))
+
+    centered_trace = calcium_trace - calcium_trace.mean()
+    n_lags = lags + 2
+    autocovariance = np.array(
+        [
+            centered_trace[lag:].dot(centered_trace[: -lag if lag else None])
+            for lag in range(1 + n_lags)
+        ],
+        dtype=np.float64,
+    ) / len(calcium_trace)
+
+    system_matrix = scipy.linalg.toeplitz(
+        autocovariance[np.arange(n_lags)],
+        autocovariance[np.arange(2)],
+    ) - noise_std**2 * np.eye(n_lags, 2)
+    ar_coefficients = np.linalg.lstsq(
+        system_matrix,
+        autocovariance[1:, np.newaxis],
+        rcond=None,
+    )[0].ravel()
+
+    roots = np.roots(np.concatenate([np.array([1.0]), -ar_coefficients]))
+    roots = np.real((roots + roots.conjugate()) / 2.0)
+    roots[roots > 1.0] = 0.95
+    roots[roots < 0.0] = 0.15
+    stabilized_coefficients = -np.poly(fudge_factor * roots)[1:]
+
+    return tuple(np.asarray(stabilized_coefficients, dtype=np.float64)), noise_std
 
 
 def deconvolve_continuous(
@@ -40,13 +81,20 @@ def deconvolve_continuous(
     continuous_activity = np.zeros((n_time, n_neurons), dtype=np.float32)
 
     for neuron_ind in range(n_neurons):
+        ar_coefficients, noise_std = _estimate_oasis_ar2_parameters(
+            calcium_traces[:, neuron_ind]
+        )
         _, spikes, _, _, _ = deconvolve(
             calcium_traces[:, neuron_ind],
-            g=(None, None),
+            g=ar_coefficients,
+            sn=noise_std,
             penalty=1,
             shift=shift,
         )
-        continuous_activity[:, neuron_ind] = np.asarray(spikes, dtype=np.float32)
+        continuous_activity[:, neuron_ind] = np.maximum(
+            np.asarray(spikes, dtype=np.float32),
+            0.0,
+        )
 
     return continuous_activity
 

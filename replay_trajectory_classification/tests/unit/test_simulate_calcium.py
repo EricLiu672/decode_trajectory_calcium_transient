@@ -351,6 +351,33 @@ def test_deconvolve_continuous_returns_prethreshold_oasis_signal():
     assert np.any(continuous_deconv > 1.0)
 
 
+def test_deconvolve_continuous_handles_notebook_scale_run_data():
+    """Continuous deconvolution stays usable for the calcium notebook run-data shape."""
+    (
+        _time,
+        _position,
+        _sampling_frequency,
+        calcium_traces,
+        _true_spikes,
+        _place_fields,
+    ) = make_simulated_run_data(
+        sampling_frequency=30,
+        track_height=120.0,
+        running_speed=10.0,
+        n_runs=2,
+        place_field_means=np.linspace(0.0, 120.0, 12),
+        sigma=1.0,
+        rng=np.random.default_rng(0),
+    )
+
+    continuous_deconv = deconvolve_continuous(calcium_traces)
+
+    assert continuous_deconv.shape == calcium_traces.shape
+    assert np.isfinite(continuous_deconv).all()
+    assert np.all(continuous_deconv >= 0.0)
+    assert np.count_nonzero(continuous_deconv) > 0
+
+
 def test_fit_sorted_spikes_decoder_decodes_binarized_calcium_run_data():
     """A decoder fit from calcium-derived spikes can recover position on a new run."""
     run_a = make_simulated_run_data(

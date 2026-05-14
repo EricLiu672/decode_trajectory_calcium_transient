@@ -8,63 +8,50 @@ import numpy as np
 from numpy.typing import NDArray
 import pandas as pd
 from scipy.special import gammaln
-import tensorflow.compat.v1 as tf
+import torch
+from torch import nn
 import xarray as xr
 
 from replay_trajectory_classification.core import atleast_2d
 
-tf.disable_v2_behavior()
-
-DTYPE = tf.float32
+TORCH_DTYPE = torch.float32
 
 
-class FullLayer:
-    """Fully connected layer helper copied from the reference ZIG implementation."""
+class _ZIGNet(nn.Module):
+    """Small feedforward network used to fit ZIG place-field parameters."""
 
-    def __init__(self):
-        self.nl_dict = {
-            "softplus": tf.nn.softplus,
-            "linear": tf.identity,
-            "softmax": tf.nn.softmax,
-            "relu": tf.nn.relu,
-            "sigmoid": tf.nn.sigmoid,
-            "tanh": tf.nn.tanh,
-        }
+    def __init__(self, x_dim: int, y_dim: int, gen_nodes: int):
+        super().__init__()
+        self.fc1 = nn.Linear(x_dim, gen_nodes)
+        self.fc2 = nn.Linear(gen_nodes, gen_nodes)
+        self.theta_head = nn.Linear(gen_nodes, y_dim)
+        self.p_head = nn.Linear(gen_nodes, y_dim)
+        self.logk = nn.Parameter(torch.zeros(y_dim, dtype=TORCH_DTYPE))
 
-    def __call__(
-        self,
-        inputs: tf.Tensor,
-        nodes: int,
-        nl: str = "softplus",
-        scope: Optional[str] = None,
-        name: str = "out",
-        initializer=None,
-        b_initializer=None,
-        isconst: bool = False,
-    ) -> tf.Tensor:
-        nonlinearity = self.nl_dict[nl]
-        input_dim = inputs.get_shape()[-1]
+        range_rate1 = 1.0 / np.sqrt(float(x_dim))
+        range_rate2 = 1.0 / np.sqrt(float(gen_nodes))
 
-        if b_initializer is None:
-            b_initializer = tf.zeros([nodes])
-        if initializer is None:
-            initializer = tf.orthogonal_initializer()
+        self._init_linear(self.fc1, range_rate1)
+        self._init_linear(self.fc2, range_rate2)
+        self._init_linear(self.theta_head, range_rate2)
+        self._init_linear(self.p_head, range_rate2)
 
-        with tf.variable_scope(scope):
-            if isconst:
-                weights = tf.get_variable(
-                    "weights", dtype=DTYPE, initializer=initializer
-                )
-            else:
-                weights = tf.get_variable(
-                    "weights",
-                    [input_dim, nodes],
-                    dtype=DTYPE,
-                    initializer=initializer,
-                )
+    @staticmethod
+    def _init_linear(layer: nn.Linear, bound: float) -> None:
+        nn.init.uniform_(layer.weight, -bound, bound)
+        nn.init.zeros_(layer.bias)
 
-            biases = tf.get_variable("biases", dtype=DTYPE, initializer=b_initializer)
-            return nonlinearity(tf.matmul(inputs, weights) + biases, name=name)
+    def forward(
+        self, inputs: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        hidden = torch.tanh(self.fc1(inputs))
+        hidden = torch.tanh(self.fc2(hidden))
+
+        theta = torch.exp(self.theta_head(hidden)) + 1e-6
+        p = torch.clamp(torch.sigmoid(self.p_head(hidden)), 1e-6, 1.0 - 1e-6)
+        k = torch.exp(self.logk) + 1e-7
+
+        return p, theta, k
 
 
 def _normalize_positions(
@@ -108,6 +95,54 @@ def _iterate_minibatches(
     ]
 
 
+def _set_torch_deterministic() -> None:
+    torch.manual_seed(0)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(0)
+        torch.cuda.manual_seed_all(0)
+
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def _get_training_device() -> torch.device:
+    if not torch.cuda.is_available():
+        return torch.device("cpu")
+
+    try:
+        probe_inputs = torch.zeros((2, 1), dtype=TORCH_DTYPE, device="cuda")
+        probe_layer = nn.Linear(1, 1).to("cuda")
+        probe_outputs = probe_layer(probe_inputs)
+        probe_outputs.sum().backward()
+        torch.cuda.synchronize()
+    except RuntimeError:
+        return torch.device("cpu")
+
+    return torch.device("cuda")
+
+
+def _zig_log_likelihood_torch(
+    calcium_activity: torch.Tensor,
+    p: torch.Tensor,
+    theta: torch.Tensor,
+    k: torch.Tensor,
+) -> torch.Tensor:
+    positive_y = torch.clamp(calcium_activity, min=1e-12)
+    k_row = k.unsqueeze(0)
+    positive_log_likelihood = (
+        torch.log(p)
+        + (k_row - 1.0) * torch.log(positive_y)
+        - (positive_y / theta)
+        - k_row * torch.log(theta)
+        - torch.lgamma(k_row)
+    )
+    zero_log_likelihood = torch.log1p(-p)
+    return torch.where(
+        calcium_activity > 0.0, positive_log_likelihood, zero_log_likelihood
+    )
+
+
 def _train_zig_model(
     position_norm: NDArray[np.float32],
     calcium_activity: NDArray[np.float32],
@@ -122,105 +157,40 @@ def _train_zig_model(
     batch_size = min(batch_size, n_samples)
     rng = np.random.default_rng(0)
 
-    graph = tf.Graph()
-    with graph.as_default():
-        tf.set_random_seed(0)
+    _set_torch_deterministic()
+    device = _get_training_device()
 
-        x = tf.placeholder(DTYPE, shape=[None, x_dim], name="position")
-        y = tf.placeholder(DTYPE, shape=[None, y_dim], name="calcium_activity")
+    model = _ZIGNet(x_dim=x_dim, y_dim=y_dim, gen_nodes=gen_nodes).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-        fully_connected_layer = FullLayer()
-        range_rate1 = 1.0 / np.sqrt(float(x_dim))
-        range_rate2 = 1.0 / np.sqrt(float(gen_nodes))
+    position_tensor = torch.as_tensor(position_norm, dtype=TORCH_DTYPE, device=device)
+    calcium_tensor = torch.as_tensor(calcium_activity, dtype=TORCH_DTYPE, device=device)
+    predict_tensor = torch.as_tensor(
+        predict_position_norm, dtype=TORCH_DTYPE, device=device
+    )
 
-        with tf.variable_scope("sngrlx_rate_nn", reuse=tf.AUTO_REUSE):
-            full1 = fully_connected_layer(
-                x,
-                gen_nodes,
-                nl="tanh",
-                scope="full1",
-                initializer=tf.random_uniform_initializer(
-                    minval=-range_rate1, maxval=range_rate1
-                ),
-            )
-            full2 = fully_connected_layer(
-                full1,
-                gen_nodes,
-                nl="tanh",
-                scope="full2",
-                initializer=tf.random_uniform_initializer(
-                    minval=-range_rate2, maxval=range_rate2
-                ),
-            )
-            full_theta = fully_connected_layer(
-                full2,
-                y_dim,
-                nl="linear",
-                scope="output_theta",
-                initializer=tf.random_uniform_initializer(
-                    minval=-range_rate2, maxval=range_rate2
-                ),
-            )
-            full_p = fully_connected_layer(
-                full2,
-                y_dim,
-                nl="linear",
-                scope="output_p",
-                initializer=tf.random_uniform_initializer(
-                    minval=-range_rate2, maxval=range_rate2
-                ),
-            )
+    model.train()
+    for _ in range(n_epochs):
+        for batch_indices in _iterate_minibatches(n_samples, batch_size, rng):
+            batch_x = position_tensor[batch_indices]
+            batch_y = calcium_tensor[batch_indices]
 
-        with tf.variable_scope("sngrlx_obsmodel", reuse=tf.AUTO_REUSE):
-            logk = tf.get_variable(
-                "logk", initializer=tf.cast(tf.zeros(y_dim), DTYPE), dtype=DTYPE
-            )
-            k = tf.exp(logk) + 1e-7
+            p, theta, k = model(batch_x)
+            log_likelihood = _zig_log_likelihood_torch(batch_y, p, theta, k)
+            loss = -torch.sum(log_likelihood)
 
-        theta = tf.exp(full_theta) + 1e-6
-        p = tf.clip_by_value(tf.nn.sigmoid(full_p), 1e-6, 1.0 - 1e-6)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        positive_y = tf.maximum(y, 1e-12)
-        k_row = tf.reshape(k, (1, y_dim))
-        positive_log_likelihood = (
-            tf.math.log(p)
-            + (k_row - 1.0) * tf.math.log(positive_y)
-            - (positive_y / theta)
-            - k_row * tf.math.log(theta)
-            - tf.math.lgamma(k_row)
-        )
-        zero_log_likelihood = tf.math.log1p(-p)
-        log_likelihood = tf.where(y > 0.0, positive_log_likelihood, zero_log_likelihood)
-
-        loss = -tf.reduce_sum(log_likelihood)
-        train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
-
-        init_op = tf.global_variables_initializer()
-        session_config = tf.ConfigProto(
-            intra_op_parallelism_threads=1, inter_op_parallelism_threads=1
-        )
-
-    with tf.Session(graph=graph, config=session_config) as session:
-        session.run(init_op)
-
-        for _ in range(n_epochs):
-            for batch_indices in _iterate_minibatches(n_samples, batch_size, rng):
-                session.run(
-                    train_op,
-                    feed_dict={
-                        x: position_norm[batch_indices],
-                        y: calcium_activity[batch_indices],
-                    },
-                )
-
-        p_pred, theta_pred, k_values = session.run(
-            [p, theta, k], feed_dict={x: predict_position_norm}
-        )
+    model.eval()
+    with torch.no_grad():
+        p_pred, theta_pred, k_values = model(predict_tensor)
 
     return (
-        np.asarray(p_pred, dtype=np.float32),
-        np.asarray(theta_pred, dtype=np.float32),
-        np.asarray(k_values, dtype=np.float32),
+        p_pred.detach().cpu().numpy().astype(np.float32, copy=False),
+        theta_pred.detach().cpu().numpy().astype(np.float32, copy=False),
+        k_values.detach().cpu().numpy().astype(np.float32, copy=False),
     )
 
 
