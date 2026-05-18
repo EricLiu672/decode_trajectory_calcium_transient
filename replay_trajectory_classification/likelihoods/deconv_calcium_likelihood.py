@@ -159,6 +159,9 @@ def _train_zig_model(
 
     _set_torch_deterministic()
     device = _get_training_device()
+    if device.type == "cuda":
+        device_name = torch.cuda.get_device_name(device)
+        print(f"Using CUDA for ZIG place-field fitting: {device_name}")
 
     model = _ZIGNet(x_dim=x_dim, y_dim=y_dim, gen_nodes=gen_nodes).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)

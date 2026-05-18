@@ -313,8 +313,8 @@ def test_deconv_calcium_likelihood_fit_returns_parameterized_place_fields():
 
 
 @pytest.mark.gpu
-def test_deconv_calcium_likelihood_fit_uses_gpu_when_available():
-    """ZIG fitting allocates CUDA memory when GPU acceleration is available."""
+def test_deconv_calcium_likelihood_fit_uses_gpu_when_available(capsys):
+    """ZIG fitting announces CUDA usage and allocates CUDA memory when available."""
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available for this test run.")
@@ -353,6 +353,8 @@ def test_deconv_calcium_likelihood_fit_uses_gpu_when_available():
         batch_size=4,
     )
 
+    captured = capsys.readouterr()
+    assert "Using CUDA for ZIG place-field fitting" in captured.out
     assert torch.cuda.max_memory_allocated() > 0
 
 
