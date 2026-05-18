@@ -22,7 +22,7 @@ The raw fluorescence signal returned by `make_simulated_run_data` as `calcium_tr
 A `SortedSpikesClassifier` using `sorted_spikes_algorithm="spiking_likelihood_kde"`, trained and predicted on binarized OASIS spikes. Treats each binarized event as a Poisson spike.
 
 **ZIG classifier**  
-A `CalciumClassifier` using `calcium_algorithm="deconv_calcium_likelihood"`, trained and predicted on continuous OASIS output. Models the calcium signal as Zero-Inflated Gamma (ZIG) distributed.
+A `CalciumClassifier` using `calcium_algorithm="deconv_calcium_likelihood"`, trained and predicted on continuous OASIS output. Models the calcium signal as Zero-Inflated Gamma (ZIG) distributed, with the place-field network fitted through PyTorch.
 
 **Gamma classifier** *(excluded from current work)*  
 A `CalciumClassifier` using `calcium_algorithm="calcium_likelihood"`. Takes raw calcium traces. Explicitly excluded from the ZIG vs Poisson KDE comparison notebooks.

@@ -312,6 +312,52 @@ def test_deconv_calcium_likelihood_fit_returns_parameterized_place_fields():
     assert k_values.shape == (2,)
 
 
+@pytest.mark.gpu
+def test_deconv_calcium_likelihood_fit_uses_gpu_when_available(capsys):
+    """ZIG fitting announces CUDA usage and allocates CUDA memory when available."""
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available for this test run.")
+    try:
+        probe_inputs = torch.zeros((2, 1), device="cuda")
+        probe_layer = torch.nn.Linear(1, 1).to("cuda")
+        probe_outputs = probe_layer(probe_inputs)
+        probe_outputs.sum().backward()
+        torch.cuda.synchronize()
+    except RuntimeError:
+        pytest.skip("Installed torch build cannot execute kernels on this GPU.")
+
+    module = importlib.import_module(
+        "replay_trajectory_classification.likelihoods.deconv_calcium_likelihood"
+    )
+    environment = make_1d_env(n=5)
+    position = np.linspace(0.0, 4.0, 10).reshape(-1, 1)
+    calcium_activity = np.column_stack(
+        [
+            np.clip(np.sin(position[:, 0]) + 1.0, 0.0, None),
+            np.clip(np.cos(position[:, 0]) + 1.0, 0.0, None),
+        ]
+    )
+
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
+    module.estimate_zig_place_fields(
+        position=position,
+        calcium_activity=calcium_activity,
+        place_bin_centers=environment.place_bin_centers_,
+        place_bin_edges=environment.place_bin_edges_,
+        gen_nodes=4,
+        learning_rate=1e-3,
+        n_epochs=1,
+        batch_size=4,
+    )
+
+    captured = capsys.readouterr()
+    assert "Using CUDA for ZIG place-field fitting" in captured.out
+    assert torch.cuda.max_memory_allocated() > 0
+
+
 def test_deconv_calcium_likelihood_is_registered_as_calcium_algorithm():
     """Test that the ZIG likelihood is discoverable through the calcium registry."""
     from replay_trajectory_classification import likelihoods
